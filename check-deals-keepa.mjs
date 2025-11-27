@@ -8,8 +8,61 @@ const ITEMS_PER_BATCH = 20;
 const SLEEP_BETWEEN_BATCHES_MS = 60_000; // 1 minute
 const INPUT_DIR = './DoNotDelete-MyListInput';
 const OUTPUT_ROOT = './output';
+const AFFILIATE_TAG = process.env.AMAZON_ASSOCIATE_TAG || '';
+const AFFILIATE_DOMAIN = process.env.AMAZON_ASSOCIATE_DOMAIN || 'www.amazon.com';
+/**
+ * If you put filenames in here (e.g. ["list1.txt", "christmas-deals.txt"]),
+ * ONLY those files will be processed.
+ * If this array is empty, ALL .txt files in INPUT_DIR will be processed.
+ */
+const SELECTED_TXT_FILES = ['apple.txt', 'sony.txt', 'today.txt'];
 
 /** ============ Helpers ============ **/
+
+function normalizeUrl(raw) {
+  let url = raw.trim();
+  if (!url) return url;
+
+  // Already has protocol → leave as is
+  if (/^https?:\/\//i.test(url)) {
+    return url;
+  }
+
+  // Short Amazon redirect links: amzn.to/xxxx → add https://
+  if (/^amzn\.to\//i.test(url)) {
+    return `https://${url}`;
+  }
+
+  // Starts with www. → just add https://
+  if (/^www\./i.test(url)) {
+    return `https://${url}`;
+  }
+
+  // Starts with amazon.com (no www) → add https://www.
+  if (/^amazon\.com\//i.test(url)) {
+    return `https://www.${url}`;
+  }
+
+  // Starts with amazon.<something> (fallback)
+  if (/^amazon\./i.test(url)) {
+    return `https://www.${url.replace(/^amazon\./i, 'amazon.')}`;
+  }
+
+  // Fallback: if no protocol, at least add https://
+  return `https://${url}`;
+}
+
+
+function buildAffiliateLink(asin) {
+  // No tag set → just return a plain dp link
+  if (!AFFILIATE_TAG) {
+    return `https://${AFFILIATE_DOMAIN}/dp/${asin}`;
+  }
+
+  return `https://${AFFILIATE_DOMAIN}/dp/${asin}?tag=${AFFILIATE_TAG}`;
+}
+
+
 function extractASIN(url) {
   try {
     const u = new URL(url);
@@ -63,6 +116,7 @@ function summarizeKeepa(product, link) {
   const discountPct = pct(original, current);
   const discountAmt = (original && current) ? original - current : 0;
   const hasDiscount = discountAmt > 0;
+  const affiliateLink = buildAffiliateLink(product.asin);
   return {
     source: 'keepa',
     asin: product.asin,
@@ -75,6 +129,7 @@ function summarizeKeepa(product, link) {
     needCheckManually,
     imageUrl: getKeepaImageUrl(product),
     hasDiscount,
+    affiliateLink
   };
 }
 
@@ -99,9 +154,10 @@ async function processTxtFile(filePath, outRootAbs) {
   await fs.mkdir(outDir, { recursive: true });
 
   const lines = (await fs.readFile(filePath, 'utf8'))
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
+  .split('\n')
+  .map(l => l.trim())
+  .filter(Boolean)
+  .map(normalizeUrl);
 
   const asinToLink = new Map();
   const asins = [];
@@ -166,6 +222,7 @@ async function processTxtFile(filePath, outRootAbs) {
       HasDiscount: r.hasDiscount,
       DiscountPct: r.discountPct != null ? Number(r.discountPct.toFixed(2)) : null,
       YouSave: fmtUsd(r.discountAmt),
+      AffiliateLink: r.affiliateLink,
     }));
 
     const outFile = path.join(outDir, `${baseName}${startIdx}-${endIdx}.json`);
@@ -188,7 +245,7 @@ async function processTxtFile(filePath, outRootAbs) {
 }
 
 /** ============ Main ============ **/
-async function main() {
+async function main(selectedFiles = SELECTED_TXT_FILES) {
   try {
     await fs.access(INPUT_DIR).catch(() => {
       console.error(`❌ ERROR: Input directory "${INPUT_DIR}" not found.`);
@@ -202,18 +259,29 @@ async function main() {
     console.log(`📁 Created fresh "${OUTPUT_ROOT}/"`);
 
     const entries = await fs.readdir(INPUT_DIR, { withFileTypes: true });
-    const txtFiles = entries
-      .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.txt'))
-      .map(e => path.join(INPUT_DIR, e.name));
+
+    let txtFiles = entries
+      .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.txt'))
+      .map((e) => path.join(INPUT_DIR, e.name));
+
+    // If selectedFiles array is not empty, filter to only those filenames
+    if (Array.isArray(selectedFiles) && selectedFiles.length > 0) {
+      const selectedSet = new Set(selectedFiles.map((name) => name.toLowerCase()));
+      txtFiles = txtFiles.filter((filePath) =>
+        selectedSet.has(path.basename(filePath).toLowerCase()),
+      );
+    }
 
     if (!txtFiles.length) {
-      console.log(`⚠️  No .txt files found in "${INPUT_DIR}".`);
+      console.log(
+        `⚠️  No .txt files to process. (Either none in "${INPUT_DIR}" or none matched SELECTED_TXT_FILES)`,
+      );
       console.log('✅ SUCCESS: Completed (no input files).');
       return;
     }
 
-    console.log(`🗂️ Found ${txtFiles.length} file(s):`);
-    txtFiles.forEach(f => console.log(' -', path.basename(f)));
+    console.log(`🗂️ Found ${txtFiles.length} file(s) to process:`);
+    txtFiles.forEach((f) => console.log(' -', path.basename(f)));
 
     const outRootAbs = path.resolve(OUTPUT_ROOT);
     for (const file of txtFiles) await processTxtFile(file, outRootAbs);
@@ -226,5 +294,8 @@ async function main() {
   }
 }
 
+export async function runKeepaScript() {
+  await main();
+}
 main();
 // run: node check-deals-keepa.mjs
